@@ -3,93 +3,81 @@ import cv2
 import numpy as np
 from utils import load_image, detect_face
 
-def extract_eye_regions(image, face):
-    """Extract eye regions using OpenCV's eye cascade"""
-    # Get face coordinates
-    x, y, w, h = face
-    
-    # Define the face ROI (Region of Interest)
-    face_roi = image[y:y+h, x:x+w]
-    
-    # Convert to grayscale
-    gray_roi = cv2.cvtColor(face_roi, cv2.COLOR_RGB2GRAY)
-    
-    # Load eye detector
-    eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
-    
-    # Detect eyes in the face region
-    eyes = eye_cascade.detectMultiScale(gray_roi, 1.1, 3)
-    
-    # If we don't find exactly 2 eyes, return empty regions
-    if len(eyes) != 2:
-        return None, None
-    
-    # Sort eyes by x-coordinate (left to right)
-    eyes = sorted(eyes, key=lambda eye: eye[0])
-    
-    # Extract each eye region with a margin
-    margin = 5
-    eye_regions = []
-    
-    for ex, ey, ew, eh in eyes:
-        # Calculate eye region coordinates relative to the original image
-        abs_ex = x + ex
-        abs_ey = y + ey
-        
-        # Extract the eye region with margin
-        eye_region = image[
-            max(0, abs_ey - margin):min(image.shape[0], abs_ey + eh + margin),
-            max(0, abs_ex - margin):min(image.shape[1], abs_ex + ew + margin)
-        ]
-        
-        eye_regions.append(eye_region)
-    
-    # Return left and right eye regions
-    if len(eye_regions) == 2:
-        return eye_regions[0], eye_regions[1]
-    else:
-        return None, None
-
 def detect_pupil(eye_region):
-    """Detect the pupil in an eye region using simple circle detection"""
+    """Detect the pupil using a simpler and more reliable method"""
     if eye_region is None or eye_region.size == 0:
         return None
     
-    # Convert to grayscale
-    gray_eye = cv2.cvtColor(eye_region, cv2.COLOR_RGB2GRAY)
-    
-    # Apply Gaussian blur
-    blurred = cv2.GaussianBlur(gray_eye, (5, 5), 0)
-    
-    # Use Hough Circle Transform to find circular objects
-    circles = cv2.HoughCircles(
-        blurred,
-        cv2.HOUGH_GRADIENT,
-        dp=1.2,
-        minDist=eye_region.shape[0]//2,
-        param1=50,
-        param2=30,
-        minRadius=0,
-        maxRadius=eye_region.shape[0]//4
-    )
-    
-    # If circles are found
-    if circles is not None:
-        # Convert to integer coordinates
-        circles = np.round(circles[0, :]).astype("int")
-        # Return the first circle (should be the pupil)
-        return (circles[0][0], circles[0][1], circles[0][2])
-    
-    # If no pupil found, estimate the center of the eye region
+    # Get dimensions
     height, width = eye_region.shape[:2]
-    return (
-        width // 2,
-        height // 2,
-        min(height, width) // 6
-    )
+    
+    # The pupil is typically in the center of the eye horizontally
+    # and slightly above the vertical center
+    
+    # Estimate pupil position based on eye anatomy
+    pupil_x = width // 2
+    pupil_y = int(height * 0.45)  # Slightly above center
+    
+    # Estimate pupil radius (typically about 1/6 to 1/8 of eye width)
+    pupil_radius = width // 7
+    
+    # Create a region of interest around estimated pupil position
+    roi_size = pupil_radius * 2
+    roi_left = max(0, pupil_x - roi_size)
+    roi_top = max(0, pupil_y - roi_size)
+    roi_right = min(width, pupil_x + roi_size)
+    roi_bottom = min(height, pupil_y + roi_size)
+    
+    roi = eye_region[roi_top:roi_bottom, roi_left:roi_right]
+    
+    # Convert to grayscale
+    gray_roi = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
+    
+    # Find the darkest point in the ROI
+    min_val, _, min_loc, _ = cv2.minMaxLoc(gray_roi)
+    
+    # Adjust coordinates relative to the original eye region
+    pupil_x = roi_left + min_loc[0]
+    pupil_y = roi_top + min_loc[1]
+    
+    return (pupil_x, pupil_y, pupil_radius)
+
+def extract_eye_regions(image, face):
+    """Extract eye regions ensuring better eye positioning"""
+    # Get face coordinates
+    x, y, w, h = face
+    
+    # Define approximate eye regions based on facial proportions
+    eye_width = w // 4
+    eye_height = h // 8
+    
+    # Vertical position (approximately 40-45% down from the top of the face)
+    eye_y = y + int(h * 0.42)
+    
+    # Left eye position (approximately 30% across from left edge)
+    left_eye_x = x + int(w * 0.25)
+    
+    # Right eye position (approximately 70% across from left edge)
+    right_eye_x = x + int(w * 0.70)
+    
+    # Calculate final coordinates with margins
+    margin = 10
+    left_eye = image[
+        max(0, eye_y - eye_height//2 - margin):min(image.shape[0], eye_y + eye_height//2 + margin),
+        max(0, left_eye_x - eye_width//2 - margin):min(image.shape[1], left_eye_x + eye_width//2 + margin)
+    ]
+    
+    right_eye = image[
+        max(0, eye_y - eye_height//2 - margin):min(image.shape[0], eye_y + eye_height//2 + margin),
+        max(0, right_eye_x - eye_width//2 - margin):min(image.shape[1], right_eye_x + eye_width//2 + margin)
+    ]
+    
+    return left_eye, right_eye
+
+
 
 def create_iris_mask(eye_region, pupil_info):
-    """Create a mask for the iris region"""
+    """Create a mask for the iris region with better proportions"""
     if eye_region is None or pupil_info is None:
         return None
     
@@ -98,8 +86,13 @@ def create_iris_mask(eye_region, pupil_info):
     # Create an empty mask the same size as the eye region
     mask = np.zeros(eye_region.shape[:2], dtype=np.uint8)
     
-    # The iris is typically 2-3 times the radius of the pupil
-    iris_radius = int(pupil_radius * 2.5)
+    # The iris is typically about 3.5-4 times the radius of the pupil
+    # This ratio works better with real human eye proportions
+    iris_radius = int(pupil_radius * 3.8)
+    
+    # Limit the iris radius to avoid going too far outside the eye
+    max_radius = min(eye_region.shape[0], eye_region.shape[1]) // 2
+    iris_radius = min(iris_radius, max_radius)
     
     # Draw the iris (outer circle)
     cv2.circle(mask, (center_x, center_y), iris_radius, 255, -1)
@@ -211,11 +204,131 @@ def detect_eye_color(image_path):
     
     return final_color, avg_confidence
 
+
+def visualize_detection(image_path):
+    """Visualize the eye detection steps"""
+    # Import matplotlib here to avoid import errors
+    import matplotlib.pyplot as plt
+    
+    # Load image
+    image = load_image(image_path)
+    original = image.copy()
+    
+    # Detect face
+    face = detect_face(image)
+    if face is None:
+        print("No face detected")
+        plt.figure(figsize=(8, 6))
+        plt.imshow(original)
+        plt.title("Original - No Face Detected")
+        plt.axis('off')
+        plt.show()
+        return
+    
+    # Draw face rectangle
+    x, y, w, h = face
+    face_img = original.copy()
+    cv2.rectangle(face_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
+    
+    # Show original and face detection
+    plt.figure(figsize=(12, 6))
+    plt.subplot(1, 2, 1)
+    plt.imshow(original)
+    plt.title("Original Image")
+    plt.axis('off')
+    
+    plt.subplot(1, 2, 2)
+    plt.imshow(face_img)
+    plt.title("Face Detected")
+    plt.axis('off')
+    plt.tight_layout()
+    plt.show()
+    
+    # Extract eyes
+    left_eye, right_eye = extract_eye_regions(image, face)
+    
+    if left_eye is None and right_eye is None:
+        print("Eyes not detected clearly")
+        return
+    
+    # Show extracted eye regions
+    plt.figure(figsize=(12, 6))
+    
+    if left_eye is not None and left_eye.size > 0:
+        plt.subplot(1, 2, 1)
+        plt.imshow(left_eye)
+        plt.title("Left Eye Region")
+        plt.axis('off')
+    else:
+        print("Left eye not detected")
+    
+    if right_eye is not None and right_eye.size > 0:
+        plt.subplot(1, 2, 2)
+        plt.imshow(right_eye)
+        plt.title("Right Eye Region")
+        plt.axis('off')
+    else:
+        print("Right eye not detected")
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Process each eye
+    for i, eye in enumerate([left_eye, right_eye]):
+        eye_name = "Left" if i == 0 else "Right"
+        if eye is None or eye.size == 0:
+            continue
+            
+        # Detect pupil
+        pupil = detect_pupil(eye)
+        if pupil is None:
+            print(f"No pupil detected in {eye_name.lower()} eye")
+            continue
+            
+        # Create iris mask
+        iris_mask = create_iris_mask(eye, pupil)
+        
+        # Show pupil and iris detection
+        plt.figure(figsize=(15, 5))
+        
+        # Original eye
+        plt.subplot(1, 3, 1)
+        plt.imshow(eye)
+        plt.title(f"{eye_name} Eye")
+        plt.axis('off')
+        
+        # Eye with pupil circle drawn
+        eye_with_pupil = eye.copy()
+        cv2.circle(eye_with_pupil, (pupil[0], pupil[1]), pupil[2], (255, 0, 0), 2)
+        plt.subplot(1, 3, 2)
+        plt.imshow(eye_with_pupil)
+        plt.title(f"Pupil Detection")
+        plt.axis('off')
+        
+        # Show iris mask
+        plt.subplot(1, 3, 3)
+        plt.imshow(iris_mask, cmap='gray')
+        plt.title(f"Iris Mask")
+        plt.axis('off')
+        
+        plt.tight_layout()
+        plt.show()
+        
+        # Analyze eye color
+        color, confidence = analyze_eye_color(eye, iris_mask)
+        print(f"{eye_name} eye color: {color}")
+        print(f"Confidence scores: {confidence}")
+
 if __name__ == "__main__":
     # Test with a sample image
     try:
         image_path = "test_images/face.jpg"  # Replace with your test image
+        print("Running eye color detection with visualization...")
+        visualize_detection(image_path)
+        
+        # Also run the regular detection to get the final result
         color, confidence = detect_eye_color(image_path)
+        print("\nFinal result:")
         print(f"Detected eye color: {color}")
         print(f"Confidence scores: {confidence}")
     except Exception as e:
